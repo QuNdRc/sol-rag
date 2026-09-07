@@ -1,0 +1,46 @@
+# Build output
+Debug/
+Release/
+x64/
+*.exe
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
+*.obj
+*.recipe
+*.tlog
+*.lastbuildstate
+*.log
+*.idb
+*.res
+*.aps
+
+# IDE
+.idea/
+.vs/
+*.user
+*.suo
+
+# llama.cpp DLLs (binary blobs — download separately)
+*.dll
+*.exp
+*.lib
+
+# Model files (too large — download separately)
+models/*.gguf
+models/*.safetensors
+
+# Generated persistence
+documents/*.bin
+
+# Test artifacts
+out_sem.txt
+nul_test.txt
+in_test.txt
+in_utf8.txt
+utf8_out.txt
+
+# OS
+Thumbs.db
+Desktop.ini
