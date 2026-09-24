@@ -190,10 +190,10 @@ void TfIdfEmbedder::fit(const std::vector<std::string>& corpus)
         idf_[it->second] = std::logf((1.0f + (float)D) / (1.0f + (float)df[it->first])) + 1.0f;
 }
 
-std::vector<float> TfIdfEmbedder::embed(const std::string& text) const
+std::vector<float> TfIdfEmbedder::embed(std::string_view text) const
 {
     std::vector<float> vec(token_to_id_.size(), 0.0f);
-    std::vector<std::wstring> toks = tokenize(to_wide(text));
+    std::vector<std::wstring> toks = tokenize(to_wide(std::string(text)));
     std::unordered_map<size_t, size_t> tf; // id -> частота в тексте
     for (size_t j = 0; j < toks.size(); ++j)
     {

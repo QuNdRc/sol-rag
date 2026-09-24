@@ -6,7 +6,7 @@
 #include <chrono>
 #include <iostream>
 #include <fstream>
-#include "kakayatohuinya.h"
+#include "glav.h"
 
 struct MinScoreCmp
 {
@@ -127,7 +127,7 @@ std::vector<Match> VectorStorage::search_top_k_par(const float* query, size_t k)
     for (float& v : q)
         v /= q_norm;
     
-    // делим базу на P диапозонов (континуум -> плюс к кэш-лояльности 
+    // делим базу на P диапозонов (континуум -> плюс к кэш-лояльности)
     
     unsigned hw = std::thread::hardware_concurrency();
     if (hw == 0) hw = 4;

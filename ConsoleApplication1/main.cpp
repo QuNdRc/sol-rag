@@ -18,10 +18,73 @@
 #else
 #include <unistd.h>  // isatty (POSIX-fallback)
 #endif
-#include "kakayatohuinya.h"
+#include "glav.h"
 #include "rag_core.h"
 #include "embedder.h"
-#include "llama_embedder.h" 
+#include "llama_embedder.h"
+#include "bm25_index.h"
+
+// Фильтр мусорных чанков: _________________, обрывки таблиц, строки
+// короче 30 символов или состоящие в основном из не-букв.
+static bool is_garbage_chunk(std::string_view c)
+{
+    // Пустой или только пробелы/непечатные символы
+    size_t first = c.find_first_not_of(" \t\r\n\v\f");
+    if (first == std::string_view::npos) return true;
+    c = c.substr(first);
+
+    // Слишком короткий
+    if (c.size() < 40) return true;
+
+    // Считаем буквы и регистр (UTF-8 aware: старший бит + латиница)
+    size_t letters = 0, upper = 0, digits = 0;
+    for (unsigned char ch : c) {
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch >= 0x80) {
+            ++letters;
+            if (ch >= 'A' && ch <= 'Z') ++upper;
+        } else if (ch >= '0' && ch <= '9') {
+            ++digits;
+        }
+    }
+    float ratio = (float)letters / (float)c.size();
+    // Меньше 25% букв — мусор (таблицы, разделители)
+    if (ratio < 0.25f) return true;
+    // Почти одни цифры — обрывок таблицы
+    if ((float)digits / (float)c.size() > 0.60f) return true;
+    // Заглавных букв больше 50% от всех букв и чанк < 300 символов —
+    // это метаданные: «УТВЕРЖДЕН», «ИСПОЛНИТЕЛИ», заголовки.
+    if (letters > 10 && (float)upper / (float)letters > 0.50f && c.size() < 300)
+        return true;
+    // Начинается с цифры + пробел и длина < 250 → метаданные/оглавление:
+    // «1 ИСПОЛНИТЕЛИ», «2 ВНЕСЕН», «4 УТВЕРЖДЕН», «5.1 Общие положения»
+    if (c.size() < 250 && c[0] >= '0' && c[0] <= '9'
+        && (c[1] == ' ' || c[1] == '.' || c[1] == '\t'))
+        return true;
+    // Чёрный список фраз метаданных (заголовки документов, штампы)
+    // «4    УТВЕРЖДЕН приказом...» проходит другие фильтры из-за длины и
+    // Unicode-пробелов — ловим по ключевым фразам.
+    if (c.find("УТВЕРЖДЕН приказом") != std::string_view::npos && c.size() < 400) return true;
+    if (c.find("ПОДГОТОВЛЕН к утверждению") != std::string_view::npos) return true;
+    if (c.find("Сведения о своде правил") != std::string_view::npos) return true;
+    if (c.find("Актуализированная редакция") != std::string_view::npos && c.size() < 300) return true;
+    if (c.find("ЗАРЕГИСТРИРОВАН Федеральным") != std::string_view::npos) return true;
+    if (c.find("ВНЕСЕН Техническим") != std::string_view::npos) return true;
+    if (c.find("ИСПОЛНИТЕЛИ - ООО") != std::string_view::npos) return true;
+    // Преамбулы документов: «1.1 Настоящий свод правил...», «1.2 ... не распространяется...»
+    // Это «Область применения» — бесполезны для конкретных запросов,
+    // но доминируют в выдаче из-за семантической близости к любым строительным темам.
+    if (c.find("Настоящий свод правил следует соблюдать") != std::string_view::npos
+        && c.size() < 2000) return true;
+    if (c.find("свод правил не распространяется на") != std::string_view::npos
+        && c.size() < 2000) return true;
+    if (c.find("Требования к котельным, а также к связанным") != std::string_view::npos
+        && c.size() < 2000) return true;
+    if (c.find("строительство, реконструкция и капитальный ремонт которых осуществляются") != std::string_view::npos
+        && c.size() < 500) return true;
+    return false;
+}
+
+// (rrf_merge переехал в rag_core.h — теперь часть публичного ядра)
 
 struct ParagraphChunker : Chunker
 {
@@ -141,16 +204,30 @@ int main(int argc, char* argv[])
                         std::string text((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
                         auto paras = chunker.chunk(text);
                         for (auto& p : paras)
-                                if (!p.empty()) chunks.push_back(p);
+                                if (!p.empty())
+                                    chunks.push_back(p);
                 }
                 std::cout << "[SYSTEM] Чанков из documents/: " << chunks.size() << "\n";
         }
 
-        // ==== СЕМАНТИЧЕСКИЙ RAG (LlamaCppEmbedder, dim=384) ====
+        // Отфильтровать мусор (______, обрывки таблиц)
+        {
+            std::vector<std::string> clean;
+            for (auto& c : chunks)
+                if (!is_garbage_chunk(c))
+                    clean.push_back(std::move(c));
+            size_t dropped = chunks.size() - clean.size();
+            chunks = std::move(clean);
+            if (dropped > 0)
+                std::cout << "[SYSTEM] Отфильтровано мусора: " << dropped << " → осталось "
+                          << chunks.size() << " чанков\n";
+        }
+
+        // ==== ГИБРИДНЫЙ RAG: dense (BGE-M3) + sparse (BM25) под одним фасадом ====
         std::filesystem::path exe_dir = std::filesystem::absolute(
             argc > 0 ? argv[0] : ".").parent_path();
         std::filesystem::path model_path = docs.parent_path() / "models"
-            / "paraphrase-multilingual-MiniLM-L12-118M-v2-Q8_0.gguf";
+            / "Bge-M3-567M-Q8_0.gguf";
 
         LlamaCppEmbedder sem_emb;
         if (!sem_emb.init(exe_dir.string().c_str(), model_path.string().c_str()))
@@ -162,46 +239,34 @@ int main(int argc, char* argv[])
         std::cout << "[SYSTEM] Семантический эмбеддер загружен, dim="
                   << sem_emb.dim() << "\n";
 
-        const std::string sem_rag_path = (docs / "rag_sem.bin").string();
-        RAG sem_rag(sem_emb.dim()); // dim=384
+        // HybridRag держит dense (RAG) и sparse (BM25) индексы в синхроне:
+        // add_chunk кладёт в оба, search ищет по обоим и сливает через RRF.
+        HybridRag hybrid(sem_emb, static_cast<size_t>(sem_emb.dim()));
 
+        const std::string sem_rag_path = (docs / "rag_sem.bin").string();
         if (std::filesystem::exists(sem_rag_path))
         {
-            if (!sem_rag.load(sem_rag_path))
+            if (!hybrid.load(sem_rag_path))
             {
-                std::cout << "[SYSTEM] rag_sem.bin битый\n";
+                std::cout << "[SYSTEM] rag_sem.bin битый — удали и перезапусти\n";
                 return 1;
             }
-            std::cout << "[SYSTEM] Семантический индекс загружен: "
-                      << sem_rag.size() << " чанков, dim=" << sem_rag.dim() << "\n";
+            std::cout << "[SYSTEM] Индекс загружен: " << hybrid.size()
+                      << " чанков, dim=" << hybrid.dim()
+                      << " (BM25 пересобран из текстов)\n";
         }
         else
         {
             for (size_t i = 0; i < chunks.size(); ++i)
-            {
-                std::vector<float> emb = sem_emb.embed(chunks[i]);
-                sem_rag.add(emb.data(), emb.size(), chunks[i]);
-            }
-            sem_rag.save(sem_rag_path);
-            std::cout << "[SYSTEM] Семантический индекс построен: "
-                      << sem_rag.size() << " чанков, dim=" << sem_rag.dim() << "\n";
+                hybrid.add_chunk(chunks[i]);
+            hybrid.save(sem_rag_path);
+            std::cout << "[SYSTEM] Индекс построен: " << hybrid.size()
+                      << " чанков, dim=" << hybrid.dim() << "\n";
         }
-        
-        const std::vector<std::string> queries = {
-                "Какая минимальная площадь кухни по нормам?",
-                "Какой ширины должна быть лестница?",
-        };
-        for (const auto& q : queries)
-        {
-                std::vector<float> qv = sem_emb.embed(q);
-                auto top = sem_rag.search(qv.data(), 3);
-                std::cout << "\n[SEM] Запрос: \"" << q << "\"\n";
-                for (const Match& m : top)
-                {
-                        std::cout << "  [" << m.index << "] score=" << m.score << " " << sem_rag.text(m.index) << "\n";
-                }
-        }
-        constexpr size_t DIM = 384; 
+
+        // (демо-запросы убраны: программа сразу переходит к бенчмарку и REPL —
+        //  захардкоженные вопросы про кухню/лестницу только мозолили глаза)
+        constexpr size_t DIM = 384;
         constexpr size_t N = 20000; // 20к чанков на 30мб флоат
         VectorStorage big;
         big.dim = DIM;
@@ -253,24 +318,34 @@ int main(int argc, char* argv[])
                 std::cout << "  top[" << i << "] idx=" << top1[i].index
                           << " score=" << top1[i].score << "\n";
         
-        // LFU-ВЫСЕЛЕНИЕ + КВАНТОВАНИЕ INT8 
+        // LFU-ВЫСЕЛЕНИЕ (демо на игрушечном индексе: 10 векторов → 5 строк лога
+        // вместо 6800; основной индекс не трогается, и работает мгновенно)
         {
-                sem_rag.set_limit(5);
-                while (sem_rag.size() > 5)
-                        sem_rag.evict();
-                std::cout << "[FILTER] После лимита 5 осталось чанков: " << sem_rag.size() << "\n";
+                RAG demo_rag(hybrid.dim());
+                std::vector<float> dv(hybrid.dim());
+                std::srand(11);
+                for (size_t i = 0; i < 10; ++i)
+                {
+                        for (float& v : dv)
+                                v = static_cast<float>(rand()) / RAND_MAX - 0.5f;
+                        demo_rag.add(dv.data(), dv.size(), "toy" + std::to_string(i));
+                }
+                demo_rag.set_limit(5);
+                while (demo_rag.size() > 5)
+                        demo_rag.evict();
+                std::cout << "[FILTER] После лимита 5 осталось чанков: " << demo_rag.size() << "\n";
         }
         {
-                const size_t d = sem_rag.dim();
+                const size_t d = hybrid.dim();
                 std::vector<int8_t> q(d);
                 float scale = 1.0f, zero = 0.0f;
-                quantize_to_int8(sem_rag.vector(0), d, q.data(), scale, zero);
+                quantize_to_int8(hybrid.dense().vector(0), d, q.data(), scale, zero);
                 std::vector<float> back(d);
                 dequantize_from_int8(q.data(), d, scale, zero, back.data());
                 float max_err = 0.0f, sq = 0.0f;
                 for (size_t i = 0; i < d; ++i)
                 {
-                        const float e = std::abs(back[i] - sem_rag.vector(0)[i]);
+                        const float e = std::abs(back[i] - hybrid.dense().vector(0)[i]);
                         max_err = std::max(max_err, e);
                         sq += e * e;
                 }
@@ -295,8 +370,8 @@ int main(int argc, char* argv[])
                         break;
                 if (line == "/stats")
                 {
-                        std::cout << "[STATS] чанков=" << sem_rag.size()
-                                  << " dim=" << sem_rag.dim() << "\n";
+                        std::cout << "[STATS] чанков=" << hybrid.size()
+                                  << " dim=" << hybrid.dim() << "\n";
                         continue;
                 }
                 if (line.rfind("/bench", 0) == 0)
@@ -344,12 +419,18 @@ int main(int argc, char* argv[])
                                   << " ms parallel=" << bp << " ms speedup=" << (bs / bp) << "x\n";
                         continue;
                 }
-                // иначе — запрос к базе знаний
-                std::vector<float> qv = sem_emb.embed(line);
-                auto top = sem_rag.search(qv.data(), 3);
-                for (const Match& m : top)
-                        std::cout << "  [" << m.index << "] score=" << m.score
-                                  << " " << sem_rag.text(m.index) << "\n";
+                // иначе — гибридный поиск через фасад (dense + BM25 + RRF внутри)
+                // Эхо запроса: в пайпе (echo ...) ввод не отображается,
+                // без этой строки результаты непонятно к какому вопросу относятся.
+                std::cout << "\n[HYBRID] Запрос: \"" << line << "\"\n";
+                auto merged = hybrid.search(line, 3);
+                if (merged.empty() || merged[0].rrf < 0.015f) {
+                    std::cout << "  [ничего не найдено]\n";
+                } else {
+                    for (const HybridHit& h : merged)
+                        std::cout << "  [" << h.index << "] rrf=" << h.rrf
+                                  << " " << hybrid.text(h.index) << "\n";
+                }
         }
         // Ввод закончился, но ни одной строки не пришло (мгновенный EOF) —
         // значит это запуск из панели IDE/редиректа, где клавиатуры нет вообще.

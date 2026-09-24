@@ -1,19 +1,21 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <unordered_map>
+#include "rag_core.h" // интерфейс Embedder
 
-
-
-
-class TfIdfEmbedder
+// Лексический эмбеддер: BoW -> TF-IDF с русским стеммингом и стоп-словами.
+// Реализует общий интерфейс Embedder, поэтому подставляется в RAG/HybridRag
+// наравне с LlamaCppEmbedder.
+class TfIdfEmbedder : public Embedder
 {
 public:
-    // первый проход, строит словарь и idf по всему корпусу dim = размер словаря 
+    // первый проход, строит словарь и idf по всему корпусу dim = размер словаря
     void fit(const std::vector<std::string>& corpus);
     //чанк или вопрос, вектор длиной vocab_size (сырые tf*idf; нормировку делает хранилище)
-    std::vector<float> embed (const std::string& text) const;
+    std::vector<float> embed(std::string_view text) const override;
     size_t vocab_size() const {return token_to_id_.size();}
     bool save(const std::string& path) const;
     bool load(const std::string& path);

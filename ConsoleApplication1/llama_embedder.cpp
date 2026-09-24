@@ -20,7 +20,7 @@ namespace
     typedef bool (*fp_llama_model_has_encoder) (const struct llama_model *);
     typedef int32_t (*fp_llama_model_n_embd)(const struct llama_model *);
     
-    typedef struct llama_context_params (*fp_llama_context_default_params)(void); //господи помоги
+    typedef struct llama_context_params (*fp_llama_context_default_params)(void); 
     typedef struct llama_context *(*fp_llama_init_from_model)(struct llama_model *, struct llama_context_params);
     typedef void  (*fp_llama_free)(struct llama_context *);
     typedef void (*fp_llama_set_n_threads)(struct llama_context *, int32_t, int32_t);
@@ -31,11 +31,12 @@ namespace
     typedef int32_t (*fp_llama_tokenize)(const struct llama_vocab *, const char *, int32_t, llama_token *, int32_t, bool, bool);
     typedef struct llama_batch (*fp_llama_batch_get_one)(llama_token *, int32_t);
     typedef int32_t (*fp_llama_encode)(struct llama_context *, struct llama_batch);
-    typedef float *(*fp_llama_get_embeddings_seq)(struct llama_context *, llama_seq_id); 
-    // ggmal.dll                                                                что такое безумие? 
+    typedef float *(*fp_llama_get_embeddings_seq)(struct llama_context *, llama_seq_id);
+    typedef void (*fp_llama_log_set)(ggml_log_callback, void *);
+    // ggmal.dll
     typedef void (*fp_ggml_backend_load_all_from_path)(const char *);
     
-    //вроде как статические указатели сейчас пойдут, ебаный мрак
+    //статические указатели
     static fp_llama_backend_init            fn_backend_init = nullptr;
     static fp_llama_backend_free            fn_backend_free = nullptr;
     static fp_llama_model_default_params            fn_model_default_params = nullptr;
@@ -54,11 +55,12 @@ namespace
     static fp_llama_batch_get_one          fn_batch_get_one = nullptr;
     static fp_llama_encode                 fn_encode = nullptr;
     static fp_llama_get_embeddings_seq      fn_get_embeddings_seq = nullptr;
+    static fp_llama_log_set                 fn_log_set = nullptr;
     
     static fp_ggml_backend_load_all_from_path           fn_backend_load_all_from_path = nullptr;
     static bool g_resolved = false; // один раз на процесс
     
-    //вспомогательные(мне помогите)
+    //вспомогательные
     
     template <typename T>
     static bool resolve(HMODULE mod, const char *name, T &out)
@@ -154,6 +156,7 @@ return false; \
     R(hl, fn_batch_get_one, "llama_batch_get_one");
     R(hl, fn_encode, "llama_encode");
     R(hl, fn_get_embeddings_seq, "llama_get_embeddings_seq");
+    R(hl, fn_log_set, "llama_log_set");
     
     R(hg, fn_backend_load_all_from_path, "ggml_backend_load_all_from_path");
 #undef R
@@ -161,6 +164,7 @@ return false; \
     g_resolved = true;
 
     fn_backend_init();
+    fn_log_set([](ggml_log_level, const char *, void *) {}, nullptr);
     // llama_backend_init() уже вызывает ggml_backend_load_all_from_path внутри —
     // повторный вызов даёт stack buffer overrun (0xC0000409) на b10063.
 
@@ -176,9 +180,9 @@ return false; \
     // хотя модель реально энкодерная. Пропускаем проверку.
     // создать контекст
     llama_context_params cparams = fn_context_default_params();
-    cparams.n_ctx = 512;
-    cparams.n_batch = 512; 
-    cparams.n_ubatch = 512;
+    cparams.n_ctx   = 2048; // BGE-M3 поддерживает 8192, берём 2048
+    cparams.n_batch = 2048;
+    cparams.n_ubatch = 2048;
     if (n_threads <= 0)
         n_threads = (int)std::thread::hardware_concurrency();
     cparams.n_threads = n_threads;
@@ -215,12 +219,13 @@ std::vector<float>LlamaCppEmbedder::embed(std::string_view text) const
     auto *vocab = static_cast<const llama_vocab *>(vocab_);
     
     //токенизация - явная длина, string_view не null-terminated
-    int n_max = fn_vocab_n_tokens(vocab);
-    if (n_max < 512) n_max = 512;
-    std::vector<llama_token> tokens((size_t)n_max);
-    int n_tokens = fn_tokenize(vocab, text.data(), (int32_t)text.size(), tokens.data(), n_max, true, true);
+    const int MAX_TOKENS = 2046; // BGE-M3 context = 2048, минус BOS/EOS
+    std::vector<llama_token> tokens((size_t)MAX_TOKENS + 2);
+    int n_tokens = fn_tokenize(vocab, text.data(), (int32_t)text.size(),
+                               tokens.data(), MAX_TOKENS, true, true);
     if (n_tokens < 0)
         return {}; // слишком длинный текст
+    if (n_tokens > MAX_TOKENS) n_tokens = MAX_TOKENS;
     
     if (n_tokens == 0)
     {

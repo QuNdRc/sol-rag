@@ -169,7 +169,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="embedder.h" />
-    <ClInclude Include="kakayatohuinya.h" />
+    <ClInclude Include="glav.h" />
     <ClInclude Include="llama_embedder.h" />
     <ClInclude Include="rag_core.h" />
   </ItemGroup>
