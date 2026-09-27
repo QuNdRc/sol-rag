@@ -10,7 +10,7 @@
 #include "glav.h"
 #include "bm25_index.h"
 
-// ---- Адаптеры (прикладной уровень, ВНЕ ядра) ----
+//  Адаптеры (прикладной уровень, ВНЕ ядра)
 // Куда потребитель втыкает свою реализацию (BoW сейчас, llama.cpp позже, свои Chunker'ы).
 
 struct Embedder
@@ -24,7 +24,7 @@ struct Chunker
     virtual ~Chunker() = default;
     virtual std::vector<std::string> chunk(const std::string& doc) const = 0;
 };
-// ---- Публичный контракт ядра ----
+
 // Ядро не знает про язык/эмбеддер: на вход готовый вектор.
 // Буферы спрятаны — инвариант размера не сломать снаружи.
 class RAG
@@ -58,7 +58,7 @@ private:
     VectorStorage store_; // движок внутри
 };
 
-// ---- Гибридный поиск: dense (RAG) + sparse (BM25) ----
+// Гибридный поиск: dense (RAG) + sparse (BM25) 
 // Результат слияния: индекс чанка + оценка RRF.
 struct HybridHit
 {
@@ -92,7 +92,7 @@ inline std::vector<HybridHit> rrf_merge(const std::vector<Match>& dense,
     return merged;
 }
 
-// ---- Фасад гибридного поиска ----
+//  Фасад гибридного поиска
 // Держит dense-индекс (RAG + Embedder) и sparse-индекс (BM25) В СИНХРОНЕ:
 // add_chunk() кладёт чанк в оба, search() ищет по обоим и сливает через RRF.
 // Потребителю не нужно знать про два индекса — один класс, два метода.

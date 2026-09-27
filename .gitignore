@@ -1,8 +1,18 @@
+# Все исходники — не публикуются (репо содержит только бинарник и публичное API)
+ConsoleApplication1/*
+!ConsoleApplication1/rag_core.h
+
+# Тестовые снипеты — не публикуются
+documents/snip_*.txt
+
+# Концепты и планы
+concept/
+plans/
+
 # Build output
 Debug/
 Release/
 x64/
-*.exe
 *.pdb
 *.ilk
 *.iobj
@@ -15,24 +25,15 @@ x64/
 *.idb
 *.res
 *.aps
+*.exp
+*.lib
+*.sln
 
 # IDE
 .idea/
 .vs/
 *.user
 *.suo
-
-# llama.cpp DLLs (binary blobs — download separately)
-*.dll
-*.exp
-*.lib
-
-# Model files (too large — download separately)
-models/*.gguf
-models/*.safetensors
-
-# Generated persistence
-documents/*.bin
 
 # Test artifacts
 out_sem.txt
